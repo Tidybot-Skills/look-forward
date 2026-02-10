@@ -1,27 +1,35 @@
 """
 look-forward: Point wrist camera forward and detect objects.
 
-Moves the arm to position the wrist camera looking ahead (tilted ~40° from down),
-runs YOLO object detection, and returns to home position.
+Simple approach: rotate J4 (elbow) by +30° from home to tilt camera forward.
+Captures from both wrist camera (high view) and base camera (low view).
 
 Author: jarvis
 """
+import math
 from robot_sdk import arm, sensors, yolo
 
 
-def run(objects: str = "person, chair, table, cup, bottle, bag, backpack, monitor", 
-        pitch_angle: float = 0.7,
-        confidence: float = 0.15):
+# Camera IDs
+WRIST_CAM = "309622300814"
+BASE_CAM = "336222071022"
+
+
+def run(objects: str = "person, chair, table, cup, bottle, bag, monitor",
+        j4_delta_deg: float = 30.0,
+        confidence: float = 0.15,
+        use_base_cam: bool = True):
     """
     Point the wrist camera forward and detect objects.
     
     Args:
         objects: Comma-separated list of objects to detect
-        pitch_angle: EE pitch angle in radians (default 0.7 = ~40°, max safe ~0.7)
-        confidence: YOLO confidence threshold (default 0.15)
+        j4_delta_deg: How much to rotate J4 in degrees (default 30°)
+        confidence: YOLO confidence threshold
+        use_base_cam: If True, also capture from base camera (fallback if wrist fails)
     
     Returns:
-        dict with 'detections' list and metadata
+        dict with detections and metadata
     """
     print("=== look-forward skill ===")
     
@@ -29,28 +37,41 @@ def run(objects: str = "person, chair, table, cup, bottle, bag, backpack, monito
     print("Going home...")
     arm.go_home()
     
-    # Step 2: Extend forward and lower slightly
-    print("Positioning arm...")
-    arm.move_delta(dx=0.15, dz=-0.1, duration=2.5)
+    # Step 2: Rotate J4 to tilt camera forward
+    joints = list(sensors.get_arm_joints())
+    original_j4 = joints[3]
+    joints[3] += math.radians(j4_delta_deg)
     
-    # Step 3: Pitch up to tilt camera forward
-    print(f"Tilting camera forward ({pitch_angle:.1f} rad)...")
-    arm.move_delta(dpitch=pitch_angle, duration=3.0)
+    print(f"Rotating J4: {math.degrees(original_j4):.1f}° → {math.degrees(joints[3]):.1f}° (+{j4_delta_deg}°)")
+    arm.move_joints(joints, duration=3.0)
     
-    # Get camera position
     ee_pos = sensors.get_ee_position()
-    print(f"Camera at: x={ee_pos[0]:.3f}, y={ee_pos[1]:.3f}, z={ee_pos[2]:.3f}")
+    print(f"Camera at: x={ee_pos[0]:.2f}, y={ee_pos[1]:.2f}, z={ee_pos[2]:.2f}")
     
-    # Step 4: Run YOLO detection on wrist camera
+    # Step 3: Run YOLO detection
     print(f"Detecting: {objects}")
-    wrist_camera_id = "309622300814"
     
-    result = yolo.segment_camera(
-        text_prompt=objects,
-        camera_id=wrist_camera_id,
-        confidence=confidence,
-        save_visualization=True
-    )
+    # Try wrist camera first, fall back to base camera
+    camera_used = WRIST_CAM
+    try:
+        result = yolo.segment_camera(
+            text_prompt=objects,
+            camera_id=WRIST_CAM,
+            confidence=confidence,
+            save_visualization=True
+        )
+    except Exception as e:
+        if use_base_cam:
+            print(f"Wrist camera failed ({e}), using base camera...")
+            camera_used = BASE_CAM
+            result = yolo.segment_camera(
+                text_prompt=objects,
+                camera_id=BASE_CAM,
+                confidence=confidence,
+                save_visualization=True
+            )
+        else:
+            raise
     
     # Collect detections
     detections = []
@@ -64,21 +85,19 @@ def run(objects: str = "person, chair, table, cup, bottle, bag, backpack, monito
     
     if not detections:
         print("  No objects detected")
-    else:
-        print(f"[YOLO] {len(detections)} object(s) detected")
     
-    # Step 5: Return home
+    # Step 4: Return home
     print("Returning home...")
     arm.go_home()
     
-    print("=== Done ===")
+    print(f"=== Done ({len(detections)} objects) ===")
     
     return {
         "detections": detections,
         "count": len(detections),
-        "objects_searched": objects,
+        "camera_used": camera_used,
         "ee_position": list(ee_pos),
-        "pitch_angle": pitch_angle
+        "j4_delta_deg": j4_delta_deg
     }
 
 
